@@ -1,0 +1,15 @@
+LICENSE
+MANIFEST
+META.yml
+Makefile.PL
+NOTES.txt
+README
+dist.ini
+eg/hi.psgi
+lib/Plack/Middleware/Scrutiny.pm
+lib/Plack/Middleware/Scrutiny/IOWrap.pm
+share/jquery.cookie.js
+share/jquery.js
+share/jquery.js.bak
+share/scrutinize.css
+share/splitter.js
