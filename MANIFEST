@@ -4,10 +4,13 @@ META.yml
 Makefile.PL
 NOTES.txt
 README
+debug.log
 dist.ini
 eg/hi.psgi
 lib/Plack/Middleware/Scrutiny.pm
+lib/Plack/Middleware/Scrutiny/Child.pm
 lib/Plack/Middleware/Scrutiny/IOWrap.pm
+lib/Plack/Middleware/Scrutiny/Util.pm
 share/jquery.cookie.js
 share/jquery.js
 share/jquery.js.bak

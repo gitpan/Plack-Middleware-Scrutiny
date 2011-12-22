@@ -11,7 +11,7 @@ install_share dist => "share";
 
 
 my %WriteMakefileArgs = (
-  "ABSTRACT" => "Scrutinize your app with a full debugger",
+  "ABSTRACT" => "Scrutinize your [psgi] app with an [inline] debugger",
   "AUTHOR" => "Brock Wilcox <awwaiid\@thelackthereof.org>",
   "BUILD_REQUIRES" => {},
   "CONFIGURE_REQUIRES" => {
@@ -28,22 +28,25 @@ my %WriteMakefileArgs = (
     "Devel::ebug::Backend" => 0,
     "Enbugger" => 0,
     "Enbugger::ebug" => 0,
+    "Exporter" => 0,
     "File::ShareDir" => 0,
     "IO::Handle" => 0,
+    "IO::String" => 0,
     "Plack::App::File" => 0,
     "Plack::Middleware" => 0,
     "Plack::Request" => 0,
     "Plack::Util" => 0,
     "Plack::Util::Accessor" => 0,
-    "Socket" => 0,
     "Storable" => 0,
+    "Time::HiRes" => 0,
     "Try::Tiny" => 0,
     "Twiggy" => 0,
+    "constant" => 0,
     "parent" => 0,
     "strict" => 0,
     "warnings" => 0
   },
-  "VERSION" => "0.01",
+  "VERSION" => "0.02",
   "test" => {
     "TESTS" => ""
   }

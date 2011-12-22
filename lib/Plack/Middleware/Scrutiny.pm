@@ -1,8 +1,9 @@
 package Plack::Middleware::Scrutiny;
+our $VERSION = '0.02';
 
 =head1 NAME
 
-Plack::Middleware::Scrutiny - Scrutinize your app with a full debugger
+Plack::Middleware::Scrutiny - Scrutinize your [psgi] app with an [inline] debugger
 
 =head1 SYNPOSIS
 
@@ -37,27 +38,33 @@ From there, the child uses L<Enbugger> to load up L<Devel::ebug::Backend> and ge
 
 Finally, the parent outputs some HTML back to the browser with the actual UI. Future interactions from the browser are intercepted by the parent and considered commands to the debugger until the C<$app> has completed its execution. Upon completion, the output from C<$app> is finally sent to the browser instead of the debugger UI.
 
+=head1 INTERNAL METHODS
+
+This is documentation for maintainers, not for users.
+
 =cut
 
 use strict;
 use warnings;
-use parent qw(Plack::Middleware);
-our $VERSION = '0.01';
-use Socket;
+use parent 'Plack::Middleware';
 use IO::Handle;
-use Storable qw( freeze thaw );
 use Data::Dumper;
-use Devel::ebug;
 use Plack::Request;
 use Try::Tiny;
 use File::ShareDir;
 use Plack::App::File;
 use Plack::Util::Accessor qw( files );
 use Plack::Util;
+use Plack::Middleware::Scrutiny::Util;
 use Plack::Middleware::Scrutiny::IOWrap;
+use Plack::Middleware::Scrutiny::Child;
 #use lib '/home/awwaiid/projects/perl/Devel-ebug/lib';
 
-our $VERSION = '0.01';
+=head2 $scrutiny->prepare_app
+
+This gets called on middleware instantiation. All we need to do is get our static files set up.
+
+=cut
 
 sub prepare_app {
   my $self = shift;
@@ -66,31 +73,48 @@ sub prepare_app {
   $self->files(Plack::App::File->new(root => $root));
 }
 
+=head2 $scrutiny->call($env)
+
+Process a request. Here we split into two modes - either we are already in the debugger and need to display that UI, or we are working on a new request and need to get the parent/child setup going.
+
+Also we might want to serve some static files for the debugger UI.
+
+=cut
+
 sub call {
   my($self, $env) = @_;
-  print STDERR "parent: got ->call\n";
+  debug parent => "got ->call ($env->{PATH_INFO})";
+
+  # If the URL contains /scrutinize/, then send static files
   if ($env->{PATH_INFO} =~ m!/scrutinize/!) {
     $env->{PATH_INFO} =~ s!.*/scrutinize/!/!;
     return $self->files->call($env);
   }
-  my $q = Plack::Request->new($env);
-  if(!$self->{in_debugger} && !$q->param('_scrutinize')) {
-    print STDERR "parent: Calling original app\n";
-    return $self->{app}->($env);
-  }
+
+  # my $q = Plack::Request->new($env);
+  # if(!$self->{in_debugger} && !$q->param('_scrutinize')) {
+    # debug parent => "Calling original app\n";
+    # return $self->{app}->($env);
+  # }
 
   return sub {
     my $respond = shift;
     if($self->{in_debugger}) {
-      print STDERR "parent: Already in debugger\n";
+      debug parent => "Already in debugger";
       return $self->in_debugger($env, $respond);
     } else {
-      print STDERR "parent: Starting new debugger\n";
+      debug parent => "Starting new debugger";
       $self->{in_debugger} = 1;
       return $self->new_request($env, $respond);
     }
   };
 }
+
+=head2 $scrutiny->new_request($env, $respond_cb)
+
+This is a new request. After calling out to get the child started, we'll start watching for responses from the child.
+
+=cut
 
 sub new_request {
   my ($self, $env, $respond) = @_;
@@ -102,11 +126,11 @@ sub new_request {
     fh => $self->{from_child},
     poll => 'r',
     cb => sub {
-      print STDERR "parent: waiting for response\n";
+      debug parent => "waiting for response";
       my ($cmd, $val) = $self->receive('from_child');
 
       if($cmd eq 'response') {
-        print STDERR "Response: " . Dumper($val);
+        debug parent => "got response: " . Dumper($val);
         $self->{response} = $val;
         # We're done, kill watcher
         delete $self->{child_watcher};
@@ -127,30 +151,39 @@ sub new_request {
     }
   );
   
-  print STDERR "parent: fixing env\n";
+  debug parent => "fixing env";
   my $env_trimmed = {%$env}; # shallow copy
   delete $env_trimmed->{'psgi.input'};
   delete $env_trimmed->{'psgix.io'};
   delete $env_trimmed->{'psgi.errors'};
 
-  # Get the child running
-  $self->send( to_child => request => $env_trimmed );
+  # We're doing InlineMode, so let's slurp the input
+  my $q = Plack::Request->new($env);
+  my $input = $q->content;
+  $env_trimmed->{'psgix.input_string'} = $input;
 
-  print STDERR "parent: Creating debug client\n";
-  # $self->{debug_client} = Debug::Client->new(
-    # host => 'localhost',
-    # port => 8080,
-  # );
-  use Devel::ebug;
+  # Get the child running
+  debug parent => "sending fixed env";
+  $self->send( to_child => request => $env_trimmed );
+  # sleep 1; # Give the client a second to get started
+
+  debug parent => "Creating debug client";
+  require Devel::ebug;
   $self->{debug_client} = Devel::ebug->new;
 
-  # Wait for client to connect
-  sleep 1; # Give the client a second to get started
-  print STDERR "parent: listening for debugger connect\n";
+  debug parent => "trying to connect to child debugger";
   $self->{debug_client}->attach(4011, 'bukifra');
-  print STDERR "parent: got it!\n";
+  debug parent => "connected!";
+  debug parent => "Telling child via debugger to run";
+  $self->{debug_client}->run();
 
-  return $self->in_debugger($env, $respond);
+  # This will give the child handler a chance to receive a response from the
+  # child, if any
+  # sleep 1;
+  debug parent => "Setting up idle UI handler";
+  $self->{idle} = AnyEvent->idle(
+    cb => sub { $self->in_debugger($env, $respond) }
+  );
 }
 
 sub in_debugger {
@@ -158,19 +191,24 @@ sub in_debugger {
   my $q = Plack::Request->new($env);
 
   # Child has completed? If so just give that back
+  # sleep 5;
+  debug parent => "Looking for response";
   if($self->{response}) {
-    print STDERR "parent: got response, sending to browser\n";
+    debug parent => "got response, sending to browser";
     $self->{in_debugger} = 0;
-    $respond->($self->{response});
+    delete $self->{idle};
+    return $respond->($self->{response});
   }
 
   my $cmd = $q->param('cmd') || 'codeline';
   my $out;
-  print STDERR "parent: sending $cmd to debugger\n";
+  debug parent => "sending $cmd to debugger";
   $out = $self->{debug_client}->$cmd;
+
+  $self->{idle} = AnyEvent->idle( cb => sub {
+  debug parent => "getting codelines from debugger";
   $out = $self->show_codelines(30);
-  # $out = join("\n", $self->{debug_client}->codelines(
-  #
+
   my @trace = $self->{debug_client}->stack_trace_human;
   my $stacktrace = join "\n", @trace;
   $stacktrace = Plack::Util::encode_html($stacktrace);
@@ -196,17 +234,19 @@ sub in_debugger {
   
   # Child has completed? If so just give that back
   if($self->{response}) {
-    print STDERR "parent: got response, sending to browser\n";
+    debug parent => "got response, sending to browser";
     $self->{in_debugger} = 0;
     delete $self->{debug_client};
-    $respond->($self->{response});
+    delete $self->{idle};
+    return $respond->($self->{response});
   }
 
   my $line = $self->{debug_client}->line;
   my $subroutine = $self->{debug_client}->subroutine;
   my $package = $self->{debug_client}->package;
 
-  $respond->([
+  delete $self->{idle};
+  return $respond->([
     200,
     ['Content-type' => 'text/html'],
     [qq|
@@ -243,7 +283,7 @@ sub in_debugger {
               <div class="perlCode">$out</div>
               <h2>REPL</h2>
               <pre>$eval_txt</pre>
-              &gt; <form id=evalform method=GET><input id=eval type=text name=eval></form>
+              &gt; <form id=evalform method=GET action="/"><input id=eval type=text name=eval></form>
             </div>
             <div>
               <h2>Vars</h2>
@@ -257,18 +297,26 @@ sub in_debugger {
     |]
   ]);
 
+  });
 }
 
 my $codelines;
 sub show_codelines {
   my ($self, $list_lines_count) = @_;
+  debug parent => "building html for codelines";
   my $ebug = $self->{debug_client};
 
   my $line_count = int($list_lines_count / 2);
 
+  debug parent => "about to get codelines for file";
+  eval {
   if (not exists $codelines->{$ebug->filename}) {
     $codelines->{$ebug->filename} = [$ebug->codelines];
   }
+  };
+  debug parent => "err - $@";
+  debug parent => "got codelines for file";
+  return unless $codelines->{$ebug->filename};
 
   my @span = ($ebug->line-$line_count .. $ebug->line+$line_count);
   @span = grep { $_ > 0 } @span;
@@ -277,6 +325,7 @@ sub show_codelines {
   my %break_points;
   $break_points{$_}++ foreach @break_points;
   my $out = '';
+  debug parent => "building each line for codelines";
   foreach my $s (@span) {
     my $line_out = '';
     my $codeline = $codelines[$s -1 ];
@@ -297,43 +346,13 @@ sub show_codelines {
     }
     $out .= $line_out;
   }
+  debug parent => "Returning codelines as html";
   return $out;
-}
-
-sub send {
-  my ($self, $dest, $type, $val) = @_;
-
-  my $dest_handle = $self->{$dest};
- 
-  print STDERR "send $dest $type\n";
-  print STDERR Dumper($val);
-  print $dest_handle "$type\n";
-  
-  $val = freeze($val);
-  $val = unpack('h*', $val);
-  print $dest_handle "$val\n";
-}
-
-sub receive {
-  my ($self, $source) = @_;
-
-  print STDERR "receive $source\n";
-
-  my $source_handle = $self->{$source};
-
-  my $cmd = <$source_handle>;
-  chomp $cmd;
-  
-  my $val = <$source_handle>;
-  chomp $val;
-  $val = pack('h*',$val);
-  $val = thaw($val);
-
-  return ($cmd, $val);
 }
 
 sub start_child {
   my ($self) = @_;
+
   my ($to_child,  $from_child);
   my ($to_parent, $from_parent);
 
@@ -343,73 +362,29 @@ sub start_child {
   $to_child->autoflush(1);
   $to_parent->autoflush(1);
 
-  $self->{to_child}    = $to_child;
-  $self->{to_parent}   = $to_parent;
-  $self->{from_child}  = $from_child;
-  $self->{from_parent} = $from_parent;
-
   my $pid = fork();
   if(!$pid) {
     # child
-    $self->manage_child;
+    my $child = Plack::Middleware::Scrutiny::Child->new(
+      to_parent   => $to_parent,
+      from_parent => $from_parent,
+      to_child   => $to_child,
+      from_child => $from_child,
+      app         => $self->{app},
+    );
+    $child->manage_child;
+    exit;
+
   } else {
     # parent
-    print STDERR "parent: saving child pid $pid\n";
+    debug parent => "saving child pid $pid";
     $self->{child_pid} = $pid;
+    $self->{to_child}    = $to_child;
+    $self->{to_parent}   = $to_parent;
+    $self->{from_child}    = $from_child;
+    $self->{from_parent}   = $from_parent;
   }
 }
-
-sub manage_child {
-  my ($self) = @_;
-  my $to_parent = $self->{to_parent};
-  my $from_parent = $self->{from_parent};
-  my $input = Plack::Middleware::Scrutiny::IOWrap->new( manager => $self );
-  while(1) {
-    print STDERR "child: waiting for env\n";
-    my ($cmd, $env) = $self->receive('from_parent');
-    $env->{'psgi.input'} = $input;
-
-    # give the parent a second or two to start listening
-    print STDERR "child: Loading debugger\n";
-    # $ENV{PERLDB_OPTS} = "RemotePort=localhost:8080";
-    $ENV{SECRET} = 'bukifra';
-    require Enbugger;
-
-    print STDERR "child: Loading ebug\n";
-    Enbugger->load_debugger('ebug');
-    print STDERR "child: stopping...\n";
-    Enbugger->stop;
-    # $DB::single = 0;
-    # $^P = 0;
-
-    print STDERR "child: Running \$app\n";
-    my $response = $self->{app}->($env);
-    print STDERR "child: sending response\n";
-
-    $self->send(to_parent => response => $response);
-    exit;
-  }
-}
-
-# Until a new Enbugger is released, we'll just fix up the ebug loader
-use Enbugger::ebug;
-package Enbugger::ebug;
-our @ISA = 'Enbugger';
-sub _load_debugger {
-  my ( $class ) = @_;
-  $class->_compile_with_nextstate();
-  require Devel::ebug::Backend;
-  $class->_compile_with_dbstate();
-  $class->init_debugger;
-  return;
-}
-
-sub _stop {
-  $DB::signal = 1;
-  return;
-}
-
-package Plack::Middleware::Scrutiny;
 
 
 =head1 BUGS
@@ -418,12 +393,13 @@ TONS I'm sure :)
 
 This is still just a sketch.
 
+One thing that I've found annoying is that 'step' doesn't actually seem to step over things. Along the same lines, this doesn't walk over the $app the way I expect/want.
+
 =head1 TODO
 
 There are a TON of ways this could be taken, especially since this is just a proof-of-concept so far. Some things are probably needed pretty soon, such as session based debugging (right now ALL new requests go to the debugger).
 
 One significant thing that I'd like to do is to provide a more advanced separate window mode. In this mode you could explore code and set breakpoints (including on the path/query), and get a list of sessions that are currently awaiting your debugging. Selecting one would enter you into a debugging session. Handy for AJAXy stuff I think.
-
 
 =head1 SEE ALSO
 

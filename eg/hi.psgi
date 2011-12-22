@@ -9,9 +9,9 @@ sub main {
   my $env = shift;
   my $q = Plack::Request->new($env);
   my $name = $q->param('name');
-  use Data::Dumper;
-  print STDERR "app: got " . Dumper($env);
-  print STDERR "hello!\n";
+  # use Data::Dumper;
+  # print STDERR "app: got " . Dumper($env);
+  # print STDERR "hello!\n";
   return [
     200,
     ['Content-type' => 'text/html'],
